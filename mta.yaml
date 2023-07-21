@@ -1,0 +1,204 @@
+_schema-version: "2.0.0"
+ID: cloud-espm-cloud-native
+version: 1.3.2
+parameters:
+  enable-parallel-deployments: true
+
+modules:
+  # the parent and the commons module needs to be build, 
+  # but not deployed as these are not microservices. They contain the libraries, helper classes
+  - name: parent
+    type: java.tomcat
+    path: .
+    build-parameters:
+      builder: custom
+      supported-platforms: []
+      commands:
+        - mvn -N install
+      timeout: 60m
+  
+  - name: commons
+    type: java.tomcat
+    path: commons
+    build-parameters:
+      builder: custom
+      supported-platforms: []
+      commands:
+        - mvn clean install
+      timeout: 60m
+      
+  - name: espm-product-svc
+    type: java.tomcat
+    path: product-service
+    build-parameters:
+      builder: maven
+      build-result: "target/product-service-1.3.2.jar"
+      timeout: 60m
+    properties:
+      TARGET_RUNTIME: tomcat
+      JBP_CONFIG_COMPONENTS: "jres: ['com.sap.xs.java.buildpack.jdk.SAPMachineJDK']"
+      JBP_CONFIG_SAP_MACHINE_JDK: "{ version: 17.+ }"
+    requires:
+      - name: espm-hana-db
+      - name: espm-xsuaa
+    parameters:
+      memory: 1G
+      buildpack: sap_java_buildpack
+    provides:
+      - name: product-service
+        properties:
+          product-url: "${default-url}"
+      - name: stock-service
+        properties:
+          product-url: "${default-url}"
+          
+  - name: espm-customer-svc
+    type: java.tomcat
+    path: customer-service
+    build-parameters:
+      builder: maven
+      build-result: "target/customer-service-1.3.2.jar"
+      timeout: 60m
+    properties:
+      TARGET_RUNTIME: tomcat
+      JBP_CONFIG_COMPONENTS: "jres: ['com.sap.xs.java.buildpack.jdk.SAPMachineJDK']"
+      JBP_CONFIG_SAP_MACHINE_JDK: "{ version: 17.+ }"
+    requires:
+      - name: espm-hana-db
+    parameters:
+      memory: 1G
+      buildpack: sap_java_buildpack
+    provides:
+      - name: customer-service
+        properties:
+          customer-url: "${default-url}"
+
+  - name: espm-sales-svc
+    type: java.tomcat
+    path: sale-service
+    build-parameters:
+      builder: maven
+      build-result: "target/sale-service-1.3.2.jar"
+      timeout: 60m
+    deployed-after:
+      - espm-product-svc
+    properties:
+      TARGET_RUNTIME: tomcat
+      QUEUE_NAME: "espm/new/7/salesorderqueue"
+      PROD_SERVICE: ~{product-service/product-url}
+      JBP_CONFIG_COMPONENTS: "jres: ['com.sap.xs.java.buildpack.jdk.SAPMachineJDK']"
+      JBP_CONFIG_SAP_MACHINE_JDK: "{ version: 17.+ }"
+    requires:
+      - name: espm-hana-db
+      - name: espm-em
+      - name: espm-destination
+      - name: espm-xsuaa
+      - name: product-service
+        group: destinations
+        properties:
+          name: product-service
+          product-url: '~{product-url}'
+          forwardAuthToken: true
+    parameters:
+      memory: 1G
+      buildpack: sap_java_buildpack
+    provides:
+      - name: sales-service
+        properties:
+          sale-url: "${default-url}"
+
+  - name: espm-worker
+    type: java.tomcat
+    path: worker
+    build-parameters:
+      builder: maven
+      build-result: "target/worker-1.3.2.jar"
+      timeout: 60m
+    properties:
+      TARGET_RUNTIME: tomcat
+      QUEUE_NAME: "espm/new/7/salesorderqueue"
+      spring.main.allow-circular-references: true
+      JBP_CONFIG_COMPONENTS: "jres: ['com.sap.xs.java.buildpack.jdk.SAPMachineJDK']"
+      JBP_CONFIG_SAP_MACHINE_JDK: "{ version: 17.+ }"
+    requires:
+      - name: espm-hana-db
+      - name: espm-em
+    parameters:
+      memory: 1G
+      buildpack: sap_java_buildpack
+      no-host: true
+      health-check-type: process
+
+  - name: espm-gateway
+    type: html5
+    path: gateway
+    parameters:
+      version: 2.0-${timestamp}
+      memory: 1G
+    properties:
+    deployed-after:
+      - espm-product-svc
+      - espm-customer-svc
+      - espm-sales-svc
+    build-parameters:
+      builder: npm
+      #build-result: dist
+      timeout: 60m
+      buildpack: https://github.com/cloudfoundry/nodejs-buildpack.git
+    requires:
+      - name: espm-xsuaa
+      - name: product-service
+        group: destinations
+        properties:
+          name: product-service
+          url: '~{product-url}'
+          forwardAuthToken: true
+      - name: stock-service
+        group: destinations
+        properties:
+          name: stock-service
+          url: '~{product-url}'
+          forwardAuthToken: true
+      - name: sales-service
+        group: destinations
+        properties:
+          name: sales-service
+          url: '~{sale-url}'
+          forwardAuthToken: true
+      - name: customer-service
+        group: destinations
+        properties:
+          name: customer-service
+          url: '~{customer-url}'
+          forwardAuthToken: true
+    provides:
+      - name: ui
+        properties:
+          url: "${default-url}"
+
+resources:
+  - name: espm-em
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: enterprise-messaging
+      service-plan: default
+      path: em-default.json
+      
+  - name: espm-destination
+    type: destination
+    parameters:
+      service: destination
+      service-plan: lite
+      
+  - name: espm-hana-db
+    type: com.sap.xs.hana-schema
+    parameters:
+      service: hana
+      service-plan: schema
+      
+  - name: espm-xsuaa
+    parameters:
+      path: ./xs-security.json
+      service-plan: application
+      service: xsuaa
+    type: org.cloudfoundry.managed-service
